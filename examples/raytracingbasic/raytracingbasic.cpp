@@ -70,6 +70,12 @@ public:
 	} uniformData;
 	vks::Buffer ubo;
 
+	struct InstanceData {
+		VkDeviceSize positionsAddress;
+		VkDeviceSize indicesAddress;
+	} instanceData;
+	vks::Buffer instanceDataBuffer;
+
 	VkPipeline pipeline;
 	VkPipelineLayout pipelineLayout;
 	VkDescriptorSet descriptorSet;
@@ -124,9 +130,10 @@ public:
 		missShaderBindingTable.destroy();
 		hitShaderBindingTable.destroy();
 		ubo.destroy();
+		instanceDataBuffer.destroy();
 	}
 
-	/*	
+	/*
 		Create a scratch buffer to hold temporary data for a ray tracing acceleration structure
 	*/
 	RayTracingScratchBuffer createScratchBuffer(VkDeviceSize size)
@@ -162,7 +169,7 @@ public:
 		return scratchBuffer;
 	}
 
-	void deleteScratchBuffer(RayTracingScratchBuffer& scratchBuffer) 
+	void deleteScratchBuffer(RayTracingScratchBuffer& scratchBuffer)
 	{
 		if (scratchBuffer.memory != VK_NULL_HANDLE) {
 			vkFreeMemory(device, scratchBuffer.memory, nullptr);
@@ -172,7 +179,7 @@ public:
 		}
 	}
 
-	void createAccelerationStructureBuffer(AccelerationStructure &accelerationStructure, VkAccelerationStructureBuildSizesInfoKHR buildSizeInfo)
+	void createAccelerationStructureBuffer(AccelerationStructure& accelerationStructure, VkAccelerationStructureBuildSizesInfoKHR buildSizeInfo)
 	{
 		VkBufferCreateInfo bufferCreateInfo{};
 		bufferCreateInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
@@ -305,9 +312,11 @@ public:
 		VkDeviceOrHostAddressConstKHR vertexBufferDeviceAddress{};
 		VkDeviceOrHostAddressConstKHR indexBufferDeviceAddress{};
 		VkDeviceOrHostAddressConstKHR transformBufferDeviceAddress{};
-		
+
 		vertexBufferDeviceAddress.deviceAddress = getBufferDeviceAddress(vertexBuffer.buffer);
+		instanceData.positionsAddress = vertexBufferDeviceAddress.deviceAddress;
 		indexBufferDeviceAddress.deviceAddress = getBufferDeviceAddress(indexBuffer.buffer);
+		instanceData.indicesAddress = indexBufferDeviceAddress.deviceAddress;
 		transformBufferDeviceAddress.deviceAddress = getBufferDeviceAddress(transformBuffer.buffer);
 
 		// Build
@@ -325,7 +334,7 @@ public:
 		accelerationStructureGeometry.geometry.triangles.transformData.deviceAddress = 0;
 		accelerationStructureGeometry.geometry.triangles.transformData.hostAddress = nullptr;
 		accelerationStructureGeometry.geometry.triangles.transformData = transformBufferDeviceAddress;
-		
+
 		// Get size info
 		VkAccelerationStructureBuildGeometryInfoKHR accelerationStructureBuildGeometryInfo{};
 		accelerationStructureBuildGeometryInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
@@ -333,7 +342,7 @@ public:
 		accelerationStructureBuildGeometryInfo.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
 		accelerationStructureBuildGeometryInfo.geometryCount = 1;
 		accelerationStructureBuildGeometryInfo.pGeometries = &accelerationStructureGeometry;
-		
+
 		const uint32_t numTriangles = 1;
 		VkAccelerationStructureBuildSizesInfoKHR accelerationStructureBuildSizesInfo{};
 		accelerationStructureBuildSizesInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
@@ -445,7 +454,7 @@ public:
 		VkAccelerationStructureBuildSizesInfoKHR accelerationStructureBuildSizesInfo{};
 		accelerationStructureBuildSizesInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
 		vkGetAccelerationStructureBuildSizesKHR(
-			device, 
+			device,
 			VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
 			&accelerationStructureBuildGeometryInfo,
 			&primitive_count,
@@ -545,7 +554,8 @@ public:
 		std::vector<VkDescriptorPoolSize> poolSizes = {
 			{ VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1 },
 			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1 },
-			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 }
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1 },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1 }
 		};
 		VkDescriptorPoolCreateInfo descriptorPoolCreateInfo = vks::initializers::descriptorPoolCreateInfo(poolSizes, 1);
 		VK_CHECK_RESULT(vkCreateDescriptorPool(device, &descriptorPoolCreateInfo, nullptr, &descriptorPool));
@@ -573,11 +583,13 @@ public:
 
 		VkWriteDescriptorSet resultImageWrite = vks::initializers::writeDescriptorSet(descriptorSet, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, &storageImageDescriptor);
 		VkWriteDescriptorSet uniformBufferWrite = vks::initializers::writeDescriptorSet(descriptorSet, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 2, &ubo.descriptor);
+		VkWriteDescriptorSet instanceDataBufferWrite = vks::initializers::writeDescriptorSet(descriptorSet, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 3, &instanceDataBuffer.descriptor);
 
 		std::vector<VkWriteDescriptorSet> writeDescriptorSets = {
 			accelerationStructureWrite,
 			resultImageWrite,
-			uniformBufferWrite
+			uniformBufferWrite,
+			instanceDataBufferWrite
 		};
 		vkUpdateDescriptorSets(device, static_cast<uint32_t>(writeDescriptorSets.size()), writeDescriptorSets.data(), 0, VK_NULL_HANDLE);
 	}
@@ -605,10 +617,17 @@ public:
 		uniformBufferBinding.descriptorCount = 1;
 		uniformBufferBinding.stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
 
+		VkDescriptorSetLayoutBinding instanceDataBufferBinding{};
+		instanceDataBufferBinding.binding = 3;
+		instanceDataBufferBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+		instanceDataBufferBinding.descriptorCount = 1;
+		instanceDataBufferBinding.stageFlags = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+
 		std::vector<VkDescriptorSetLayoutBinding> bindings({
 			accelerationStructureLayoutBinding,
 			resultImageLayoutBinding,
-			uniformBufferBinding
+			uniformBufferBinding,
+			instanceDataBufferBinding
 			});
 
 		VkDescriptorSetLayoutCreateInfo descriptorSetlayoutCI{};
@@ -695,6 +714,19 @@ public:
 		VK_CHECK_RESULT(ubo.map());
 
 		updateUniformBuffers();
+	}
+
+	void createInstanceDataBuffer()
+	{
+		VK_CHECK_RESULT(vulkanDevice->createBuffer(
+			VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+			&instanceDataBuffer,
+			sizeof(instanceData),
+			&instanceData));
+		VK_CHECK_RESULT(instanceDataBuffer.map());
+
+		memcpy(instanceDataBuffer.mapped, &instanceData, sizeof(instanceData));
 	}
 
 	/*
@@ -879,6 +911,7 @@ public:
 
 		createStorageImage();
 		createUniformBuffer();
+		createInstanceDataBuffer();
 		createRayTracingPipeline();
 		createShaderBindingTable();
 		createDescriptorSets();
